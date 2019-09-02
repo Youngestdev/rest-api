@@ -2,127 +2,84 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"github.com/gorilla/mux"
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
-	"log"
+	"net/http"
+	"time"
 )
-// Curled from the official mongo docs for Go
-type Trainer struct {
-	Name string
-	Age  int
-	City string
+
+var client *mongo.Client
+
+type Food struct {
+	ID        primitive.ObjectID `json:"_id,omitempty" bson:"_id,omitempty"`
+	Name string             `json:"name,omitempty" bson:"name,omitempty"`
+	Tribe  string             `json:"tribe,omitempty" bson:"tribe,omitempty"`
+}
+
+func AddFood(response http.ResponseWriter, request *http.Request) {
+	response.Header().Set("content-type", "application/json")
+	var food Food
+	_ = json.NewDecoder(request.Body).Decode(&food)
+	collection := client.Database("foodrestapi").Collection("foods")
+	ctx, _ := context.WithTimeout(context.Background(), 5*time.Second)
+	result, _ := collection.InsertOne(ctx, food)
+	json.NewEncoder(response).Encode(result)
+}
+
+func GetFood(response http.ResponseWriter, request *http.Request) {
+	response.Header().Set("content-type", "application/json")
+	params := mux.Vars(request)
+	id, _ := primitive.ObjectIDFromHex(params["id"])
+	var food Food
+	collection := client.Database("foodrestapi").Collection("foods")
+	ctx, _ := context.WithTimeout(context.Background(), 30*time.Second)
+	err := collection.FindOne(ctx, Food{ID: id}).Decode(&food)
+	if err != nil {
+		response.WriteHeader(http.StatusInternalServerError)
+		response.Write([]byte(`{ "message": "` + err.Error() + `" }`))
+		return
+	}
+	json.NewEncoder(response).Encode(food)
+}
+
+func GetFoods(response http.ResponseWriter, request *http.Request) {
+	response.Header().Set("content-type", "application/json")
+	var foods []Food
+	collection := client.Database("foodrestapi").Collection("foods")
+	ctx, _ := context.WithTimeout(context.Background(), 30*time.Second)
+	cursor, err := collection.Find(ctx, bson.M{})
+	if err != nil {
+		response.WriteHeader(http.StatusInternalServerError)
+		response.Write([]byte(`{ "message": "` + err.Error() + `" }`))
+		return
+	}
+	defer cursor.Close(ctx)
+	for cursor.Next(ctx) {
+		var food Food
+		cursor.Decode(&food)
+		foods = append(foods, food)
+	}
+	if err := cursor.Err(); err != nil {
+		response.WriteHeader(http.StatusInternalServerError)
+		response.Write([]byte(`{ "message": "` + err.Error() + `" }`))
+		return
+	}
+	json.NewEncoder(response).Encode(foods)
 }
 
 func main() {
+	fmt.Println("Starting the application...")
+	ctx, _ := context.WithTimeout(context.Background(), 10*time.Second)
 	clientOptions := options.Client().ApplyURI("mongodb://localhost:27017")
-
-	//  Connect to MongoDB
-	client, err := mongo.Connect(context.TODO(), clientOptions)
-
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	//Check the connection
-	err = client.Ping(context.TODO(), nil)
-
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	fmt.Println("Connection successful.")
-
-	collection := client.Database("restapi").Collection("trainers")
-
-	abdul := Trainer{"Abdulazeez Abdulazeez Adeshina", 16, "Lekki, Lagos"}
-
-	// Insert data
-
-	insertData, err := collection.InsertOne(context.TODO(), abdul)
-
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	fmt.Println("Inserted a single document: ", insertData.InsertedID)
-
-	//  For multiple.
-
-	trainera := Trainer{"Abdulazeez Abdulazeez Adeshina2", 16, "Lekki, Lagos"}
-	trainerb := Trainer{"Abdulazeez Abdulazeez Adeshina3", 16, "Lekki, Lagos"}
-	trainers := []interface{}{trainera, trainerb}
-
-	insertManyData, err := collection.InsertMany(context.TODO(), trainers)
-	if err != nil {
-		log.Fatal(err)
-	}
-	fmt.Println("Inserted multiple documents: ", insertManyData.InsertedIDs)
-
-	//Update document
-	filter := bson.D{{"name", "Abdulazeez Abdulazeez Adeshina"}}
-	updatedDoc := bson.D{
-		{"$inc", bson.D{
-			{"age", 1},
-		}},
-	}
-
-	updateResult, err := collection.UpdateOne(context.TODO(), filter, updatedDoc)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	fmt.Println("Matched %v documents and updated %v documents. \n", updateResult.MatchedCount, updateResult.ModifiedCount)
-
-	//Find a document.
-	var res Trainer
-	err = collection.FindOne(context.TODO(), filter).Decode(&res)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	fmt.Println("Found a single document: %v\n", res)
-
-	//  Find multiple - will come in handy soon.
-
-	findoptions := options.Find()
-	findoptions.SetLimit(2)
-
-	var reses []*Trainer
-
-	cur, err := collection.Find(context.TODO(), bson.D{{}}, findoptions)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	//  Let's loop, lol.
-
-	for cur.Next(context.TODO()) {
-
-		//  create a single value into which a single document can be decoded
-		var elem Trainer
-		err := cur.Decode(&elem)
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		reses = append(reses, &elem)
-	}
-
-	if err := cur.Err(); err != nil {
-		log.Fatal(err)
-	}
-
-	cur.Close(context.TODO())
-
-	fmt.Printf("Found multiple documents (array of pointers: %v\n", reses)
-
-	//Delete document
-
-	deleteDocument, err := collection.DeleteMany(context.TODO(), bson.D{{}})
-	if err != nil {
-		log.Fatal(err)
-	}
-	fmt.Printf("Deleted %v documents in the trainers collection\n", deleteDocument.DeletedCount)
+	client, _ = mongo.Connect(ctx, clientOptions)
+	router := mux.NewRouter()
+	router.HandleFunc("/food", AddFood).Methods("POST")
+	router.HandleFunc("/foods", GetFoods).Methods("GET")
+	router.HandleFunc("/food/{id}", GetFood).Methods("GET")
+	http.ListenAndServe(":12345", router)
 }
